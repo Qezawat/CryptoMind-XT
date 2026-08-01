@@ -19,10 +19,10 @@ class Config:
 
     XT_FUTURES_HOST: str = os.getenv("XT_FUTURES_HOST", "https://fapi.xt.com")
 
-    DEFAULT_SYMBOL: str = "esp_usdt"
+    DEFAULT_SYMBOL: str = "uai_usdt"
     DEFAULT_LEVERAGE: int = 50
     DEFAULT_MARGIN_MODE: str = "CROSSED"
-    DEFAULT_TIMEFRAMES: list = ["1m","15m"]
+    DEFAULT_TIMEFRAMES: list = ["15m"]
     DEFAULT_MARGIN_AMOUNT_PCT: float = 25.0
     DEFAULT_RISK_PCT: float = 1.0
     SIGNAL_COOLDOWN_MINUTES: int = 5
@@ -37,13 +37,13 @@ class Config:
     GUARD_INTERVAL_SEC: int = 15
     MAX_LOSS_PCT: float = 40.0
     MAX_PROFIT_PCT: float = 500.0
-    BREAKEVEN_THRESHOLD_PCT: float = 5.0
-    TRAILING_STOP_PCT: float = 10.0
+    BREAKEVEN_THRESHOLD_PCT: float = 30.0
+    TRAILING_STOP_PCT: float = 50.0
 
     # Trailing has two independent knobs: the ROI on margin that arms it, and
     # how far behind the mark price the stop sits (raw price percentage).
-    TRAILING_TRIGGER_ROI_PCT: float = 10.0
-    TRAILING_DISTANCE_PCT: float = 0.5
+    TRAILING_TRIGGER_ROI_PCT: float = 50.0
+    TRAILING_DISTANCE_PCT: float = 0.8
 
     # Stop loss must sit well inside the liquidation price, otherwise the
     # position is liquidated before the stop can trigger. 0.5 means the stop
