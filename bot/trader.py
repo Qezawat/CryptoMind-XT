@@ -479,13 +479,13 @@ class XTTrader:
 
     def _auto_trade_loop(self):
         logger.info("Auto-trade monitoring loop started")
-        scan_interval = int(self.memory.get_setting("scan_interval_sec", 60))
-        guard_interval = int(self.memory.get_setting("guard_interval_sec", 15))
         mid_manage_interval = 300
         last_scan = 0.0
         last_mid = 0.0
 
         while not self._stop_monitor.is_set():
+            scan_interval = int(self.memory.get_setting("scan_interval_sec", 60))
+            guard_interval = int(self.memory.get_setting("guard_interval_sec", 15))
             now = time.time()
             try:
                 # Adoption runs first: everything below keys off the local DB, so

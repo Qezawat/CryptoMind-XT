@@ -192,7 +192,7 @@ class RiskManager:
             for b in brackets:
                 if notional <= float(b.get("maxNominalValue") or 0):
                     return int(float(b.get("maxLeverage") or 1))
-        return int(float(brackets[0].get("maxLeverage") or 1))
+        return max(int(float(b.get("maxLeverage") or 1)) for b in brackets)
 
     def validate_leverage(self, symbol: str, leverage: int, notional: float = None) -> int:
         max_lev = self.get_max_leverage(symbol, notional)

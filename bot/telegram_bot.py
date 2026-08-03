@@ -60,6 +60,7 @@ class TelegramBot:
             "Commands:\n"
             "/pnl - Profit/Loss summary\n"
             "/status - Bot status\n"
+            "/balance - Account balance\n"
             "/autotrade_on - Enable auto-trading\n"
             "/autotrade_off - Disable auto-trading\n"
             "/signal - Scan for signals\n"
@@ -67,7 +68,12 @@ class TelegramBot:
             "/check_ai - Test AI connection\n"
             "/timeframes - View/change timeframes\n"
             "/margin_amount_pct <value> - Set margin %\n"
-            "/margin_risk_pct <value> - Set risk %\n\n"
+            "/margin_risk_pct <value> - Set risk %\n"
+            "/close [trade_id] - Close a position\n"
+            "/diag - Diagnose mid-management\n"
+            "/sync - Sync with exchange positions\n"
+            "/protect - Attach stops to unprotected positions\n"
+            "/midmanage - Run breakeven + trailing now\n\n"
             "You can also chat with me normally to change settings!"
         )
 
@@ -134,16 +140,7 @@ class TelegramBot:
         settings = self.memory.get_all_settings()
         if not settings:
             await update.message.reply_text("No custom settings. Using defaults.")
-            settings = {
-                "symbol": Config.DEFAULT_SYMBOL,
-                "leverage": Config.DEFAULT_LEVERAGE,
-                "margin_mode": Config.DEFAULT_MARGIN_MODE,
-                "timeframes": ",".join(Config.DEFAULT_TIMEFRAMES),
-                "margin_amount_pct": Config.DEFAULT_MARGIN_AMOUNT_PCT,
-                "margin_risk_pct": Config.DEFAULT_RISK_PCT,
-                "min_confidence": Config.MIN_CONFIDENCE,
-                "cooldown_minutes": Config.SIGNAL_COOLDOWN_MINUTES,
-            }
+            settings = Config.default_settings()
         response = "Current Settings:\n"
         for k, v in settings.items():
             response += f"  {k}: {v}\n"
