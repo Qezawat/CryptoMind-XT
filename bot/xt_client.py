@@ -60,8 +60,8 @@ class XTClient:
             f"{self._prefix}-recvwindow": "60000",
             f"{self._prefix}-algorithms": "HmacSHA256",
         }
-        # Fallback for older XT docs/examples that misspelled signature
-        headers[f"{self._prefix}-singature"] = sig 
+        # FIX: Removed the typo fallback header "singature" which was causing
+        # signature validation failures. Only use the correct "signature" header.
         return headers
 
     # ---------- transport ----------
