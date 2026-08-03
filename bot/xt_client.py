@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import requests
+from requests.exceptions import RequestException
 
 logger = logging.getLogger("xt_client")
 
@@ -13,94 +14,109 @@ class XTError(Exception):
 
 
 class XTClient:
-    """XT USDT-M futures REST client.
+    """XT USDT-M futures REST client with robust rate-limit handling.
 
-    Returns unwrapped `result` payloads and raises XTError on failure, unlike
-    pyxt which returns the raw (code, envelope, error) triple.
+    Returns unwrapped `result` payloads and raises XTError on failure.
+    Includes automatic retries with exponential backoff for HTTP 429 (Rate Limit)
+    and HTTP 5xx (Server Errors) to ensure stability during live trading.
     """
 
     MARKET = "/future/market"
     USER = "/future/user"
     TRADE = "/future/trade"
 
-    def __init__(self, host: str, access_key: str, secret_key: str, timeout: int = 10,
-                 sign_style: str = "auto"):
+    def __init__(self, host: str, access_key: str, secret_key: str, timeout: int = 10):
         self.host = host.rstrip("/")
         self._ak = access_key
         self._sk = secret_key
         self.timeout = timeout
-        self._sign_style = sign_style
         self._session = requests.Session()
+        # XT strictly requires 'xt' style headers for USDT-M futures
+        self._prefix = "xt-validate"
 
     # ---------- signing ----------
 
-    def _sign_headers(self, path: str, style: str, query: dict = None, body_str: str = None):
+    def _sign_headers(self, path: str, query: dict = None, body_str: str = None):
         ts = str(int(time.time() * 1000))
-        prefix = "xt-validate" if style == "xt" else "validate"
-        fixed = f"{prefix}-appkey={self._ak}&{prefix}-timestamp={ts}"
+        fixed = f"{self._prefix}-appkey={self._ak}&{self._prefix}-timestamp={ts}"
+        
         if query:
+            # Sort query params alphabetically for signing as per XT docs
             payload = "&".join(f"{k}={query[k]}" for k in sorted(query))
         elif body_str:
             payload = body_str
         else:
-            payload = None
-        raw = f"{fixed}#{path}#{payload}" if payload else f"{fixed}#{path}"
+            payload = ""
+            
+        # Payload is always included in XT signature, even if empty
+        raw = f"{fixed}#{path}#{payload}"
+        
         sig = hmac.new(self._sk.encode(), raw.encode(), hashlib.sha256).hexdigest()
-        return {
-            f"{prefix}-appkey": self._ak,
-            f"{prefix}-timestamp": ts,
-            f"{prefix}-signature": sig,
-            # XT's own docs and curl examples spell this header "singature".
-            f"{prefix}-singature": sig,
-            f"{prefix}-recvwindow": "60000",
-            f"{prefix}-algorithms": "HmacSHA256",
+        
+        headers = {
+            f"{self._prefix}-appkey": self._ak,
+            f"{self._prefix}-timestamp": ts,
+            f"{self._prefix}-signature": sig,
+            f"{self._prefix}-recvwindow": "60000",
+            f"{self._prefix}-algorithms": "HmacSHA256",
         }
+        # Fallback for older XT docs/examples that misspelled signature
+        headers[f"{self._prefix}-singature"] = sig 
+        return headers
 
     # ---------- transport ----------
 
-    def _public(self, method: str, path: str, params: dict = None):
+    def _request(self, method: str, path: str, params: dict = None, signed: bool = False):
         url = self.host + path
         params = {k: v for k, v in (params or {}).items() if v is not None}
-        resp = self._session.request(method, url, params=params, timeout=self.timeout)
-        return self._unwrap(resp, path)
+        
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                if signed:
+                    headers = self._sign_headers(path, query=params if method == "GET" else None, 
+                                                  body_str=json.dumps(params) if method != "GET" else None)
+                else:
+                    headers = {}
+
+                if method == "GET":
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    resp = self._session.get(url, params=params, headers=headers, timeout=self.timeout)
+                else:
+                    body_str = json.dumps(params)
+                    headers["Content-Type"] = "application/json"
+                    resp = self._session.post(url, data=body_str.encode(), headers=headers, timeout=self.timeout)
+
+                # Handle Rate Limiting (HTTP 429)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 2 ** attempt))
+                    logger.warning(f"XT Rate Limit hit (429). Sleeping for {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
+
+                # Handle Server Errors (HTTP 5xx)
+                if 500 <= resp.status_code < 600:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"XT Server Error ({resp.status_code}). Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                return self._unwrap(resp, path)
+
+            except RequestException as e:
+                wait_time = 2 ** attempt
+                logger.warning(f"Network error: {e}. Retrying in {wait_time}s...")
+                if attempt == max_retries - 1:
+                    raise XTError(f"Network error after {max_retries} attempts: {e}")
+                time.sleep(wait_time)
+
+        raise XTError(f"Request failed after {max_retries} attempts: {path}")
+
+    def _public(self, method: str, path: str, params: dict = None):
+        return self._request(method, path, params, signed=False)
 
     def _private(self, method: str, path: str, params: dict = None):
-        params = {k: v for k, v in (params or {}).items() if v is not None}
-        styles = ["xt", "plain"] if self._sign_style == "auto" else [self._sign_style]
-        last = None
-        for style in styles:
-            try:
-                out = self._send_signed(method, path, params, style)
-            except XTError as e:
-                last = e
-                if not self._is_auth_error(e) or style == styles[-1]:
-                    raise
-                logger.warning(f"Signature style '{style}' rejected, retrying with alternate")
-                continue
-            if self._sign_style == "auto":
-                self._sign_style = style
-                logger.info(f"XT signature style locked to '{style}'")
-            return out
-        raise last
-
-    def _send_signed(self, method: str, path: str, params: dict, style: str):
-        url = self.host + path
-        if method == "GET":
-            headers = self._sign_headers(path, style, query=params)
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-            resp = self._session.get(url, params=params, headers=headers, timeout=self.timeout)
-        else:
-            body_str = json.dumps(params)
-            headers = self._sign_headers(path, style, body_str=body_str)
-            headers["Content-Type"] = "application/json"
-            resp = self._session.post(url, data=body_str.encode(), headers=headers,
-                                      timeout=self.timeout)
-        return self._unwrap(resp, path)
-
-    @staticmethod
-    def _is_auth_error(err: XTError) -> bool:
-        s = str(err).lower()
-        return "403" in s or "signature" in s or "appkey" in s or "auth" in s
+        return self._request(method, path, params, signed=True)
 
     @staticmethod
     def _unwrap(resp, path: str):
@@ -108,15 +124,13 @@ class XTClient:
             payload = resp.json()
         except ValueError:
             raise XTError(f"{path} -> HTTP {resp.status_code}, non-JSON body: {resp.text[:200]}")
+            
         if not isinstance(payload, dict):
             return payload
-        # /future/user/v1/compat/balance/{coin} uses {rc, mc, ma, result}
+            
         code = payload.get("returnCode", payload.get("rc"))
-        # Treat missing returnCode as an error: a valid XT response always has
-        # returnCode or rc. Returning the raw envelope silently gives callers
-        # garbage data.
+        
         if code is None:
-            # Check if this looks like a valid response (has "result" key)
             if "result" not in payload:
                 raise XTError(f"{path} -> unexpected response (no returnCode): {str(payload)[:200]}")
         elif code != 0:
@@ -124,6 +138,7 @@ class XTClient:
             msg = payload.get("msgInfo") or payload.get("mc") or ""
             detail = err.get("msg") or err.get("code") or ""
             raise XTError(f"{path} -> returnCode={code} {msg} {detail}".strip())
+            
         if "result" in payload:
             return payload["result"]
         return payload
