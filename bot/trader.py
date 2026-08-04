@@ -276,7 +276,7 @@ class XTTrader:
                 "timeframes", ",".join(Config.DEFAULT_TIMEFRAMES)),
         )
 
-        ok, protected_qty, tpsl_error = self.position_mgr.attach_tpsl_to_position(
+        ok, protected_qty, _tpsl_pid, tpsl_error = self.position_mgr.attach_tpsl_to_position(
             symbol=symbol, position_side=direction,
             trigger_profit_price=tp_price, trigger_stop_price=sl_price,
         )
