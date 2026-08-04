@@ -47,21 +47,26 @@ class XTClient:
             payload = body_str
         else:
             payload = ""
-            
-        # Payload is always included in XT signature, even if empty
-        raw = f"{fixed}#{path}#{payload}"
-        
+
+        # The signed string is "#{path}" with NO trailing "#" when there is no
+        # query string / body. XT computes the server-side signature this way
+        # (see pyxt _create_sign and XT.Net XTFuturesAuthenticationProvider); a
+        # stray trailing "#" changes the HMAC and fails validation on every
+        # no-parameter signed call (get_balances, get_listen_key, ...).
+        raw = f"{fixed}#{path}#{payload}" if payload else f"{fixed}#{path}"
+
         sig = hmac.new(self._sk.encode(), raw.encode(), hashlib.sha256).hexdigest()
-        
+
         headers = {
+            "validate-signversion": "2",
             f"{self._prefix}-appkey": self._ak,
             f"{self._prefix}-timestamp": ts,
             f"{self._prefix}-signature": sig,
             f"{self._prefix}-recvwindow": "60000",
             f"{self._prefix}-algorithms": "HmacSHA256",
         }
-        # FIX: Removed the typo fallback header "singature" which was causing
-        # signature validation failures. Only use the correct "signature" header.
+        # Only the correct "signature" header is sent. The older typo fallback
+        # "singature" header was removed.
         return headers
 
     # ---------- transport ----------
