@@ -81,6 +81,13 @@ class MACDStrategy(StrategyBase):
             return "SHORT", conf, {}
         return "NEUTRAL", 0, {}
 
+    def _confidence(self, strength: float) -> int:
+        # Crossover confidence. strength is already capped at 100 by the caller
+        # (histogram size scaled by *50000). Same shape as the other strategies,
+        # but capped slightly under the trend-continuation cap so a histogram
+        # zero-crossing never overrules a sustained MACD trend.
+        return min(90, int(55 + strength * 0.5))
+
 
 class RSIStrategy(StrategyBase):
     name = "RSI"

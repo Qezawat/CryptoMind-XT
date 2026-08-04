@@ -321,6 +321,21 @@ class TelegramBot:
         for chunk in _split_message(response):
             await update.message.reply_text(chunk)
 
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Global error handler for the Telegram Application.
+
+        Without it PTB just logs "No error handlers are registered" and the
+        exception is dropped silently. Here we log the full traceback and tell
+        the owner, so a failing command is never invisible.
+        """
+        err = context.error
+        logger.error(f"Telegram handler error: {err}", exc_info=err)
+        try:
+            await self._send_notification(f"⚠️ Telegram error: {err}")
+        except Exception:
+            # Never let the error handler itself raise (it would crash polling).
+            pass
+
     def run(self):
         app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
@@ -342,6 +357,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("protect", self.cmd_protect))
         app.add_handler(CommandHandler("midmanage", self.cmd_midmanage))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        app.add_error_handler(self.error_handler)
 
         app.post_init = self._register_bot_commands
 
