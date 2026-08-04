@@ -162,13 +162,30 @@ class PositionManager:
                     symbol, position_side, available,
                     trigger_profit_price, trigger_stop_price)
                 if ok:
-                    return True, available, None
+                    # XT's create-profit returns the new profitId directly; the
+                    # caller needs it so it never has to re-discover the order
+                    # (the position's profitId field can lag or read empty).
+                    return True, available, data, None
                 last_error = error
             else:
                 last_error = "position not filled yet"
             if attempt < attempts:
                 time.sleep(delay)
-        return False, 0, last_error
+        return False, 0, None, last_error
+
+    def _get_profit_id(self, symbol: str, position_side: str, pos: dict):
+        """The id of the position's attached TP/SL entrust.
+
+        Reads it from the position object first, then falls back to the active
+        entrust list. The position's ``profitId`` field can be empty on XT even
+        when a profit entrust exists; relying on it alone made the bot re-create
+        TP/SL orders on every management cycle and blocked breakeven/trailing
+        (both need a profitId to move the stop).
+        """
+        pid = pos.get("profit_id")
+        if pid:
+            return pid
+        return self.find_tpsl(symbol, position_side).get("profitId")
 
     def ensure_tpsl(self, symbol: str, position_side: str,
                     trigger_stop_price: float = None,
@@ -179,8 +196,9 @@ class PositionManager:
         pos = self.get_position_pnl(symbol, position_side)
         if not pos["exists"]:
             return None, "no open position"
-        if pos["profit_id"]:
-            return pos["profit_id"], "already protected"
+        existing = self._get_profit_id(symbol, position_side, pos)
+        if existing:
+            return existing, "already protected"
 
         entry = pos["entry_price"]
         leverage = pos["leverage"]
@@ -216,20 +234,22 @@ class PositionManager:
             sl = max(min(sl, safe_sl), safe_sl_price)
             tp = min(tp, self.risk.round_price(symbol, mark * 0.999))
 
-        ok, contracts, error = self.attach_tpsl_to_position(
+        ok, contracts, created_pid, error = self.attach_tpsl_to_position(
             symbol, position_side, tp, sl)
         if not ok:
             return None, f"could not create TP/SL: {error}"
-        # Exchange may take a moment to propagate the profit_id after creation.
+        # The create response already carries the profitId; if it is missing
+        # (defensive), give the entrust list a moment to propagate.
+        profit_id = created_pid
         for attempt in range(3):
-            refreshed = self.get_position_pnl(symbol, position_side)
-            if refreshed.get("profit_id"):
+            if profit_id:
                 break
+            profit_id = self.find_tpsl(symbol, position_side).get("profitId")
             if attempt < 2:
                 time.sleep(1.0)
         logger.info(f"Attached TP/SL to existing {symbol} {position_side}: "
-                    f"{contracts}c TP={tp} SL={sl} profit_id={refreshed.get('profit_id')}")
-        return refreshed.get("profit_id"), f"created TP={tp} SL={sl} on {contracts} contracts"
+                    f"{contracts}c TP={tp} SL={sl} profit_id={profit_id}")
+        return profit_id, f"created TP={tp} SL={sl} on {contracts} contracts"
 
     def get_active_tpsl(self, symbol: str) -> list:
         orders = []
@@ -274,12 +294,13 @@ class PositionManager:
                          f"ROI {pos['roi']:.2f}% < {threshold}%")
             return False
         entry = pos["entry_price"]
-        profit_id = pos["profit_id"]
+        profit_id = self._get_profit_id(symbol, position_side, pos)
         if entry <= 0:
             return False
         if not profit_id:
-            logger.warning(f"Breakeven blocked for {symbol} {position_side}: position "
-                           f"has no profitId (no exchange TP/SL attached)")
+            logger.warning(f"Breakeven blocked for {symbol} {position_side}: "
+                           f"no active TP/SL entrust found (position profitId "
+                           f"empty and entrust list has none)")
             return False
         current_sl = pos["trigger_stop_price"]
         # Only ever tighten. A manually placed stop that is already better than
@@ -314,9 +335,9 @@ class PositionManager:
         if pos["roi"] < trigger_roi:
             return False, (f"ROI {pos['roi']:.2f}% below trailing trigger "
                            f"{trigger_roi}%"), None
-        profit_id = pos["profit_id"]
+        profit_id = self._get_profit_id(symbol, position_side, pos)
         if not profit_id:
-            return False, "no exchange TP/SL attached to position (no profitId)", None
+            return False, "no active TP/SL entrust found (cannot move the stop)", None
         mark = pos["mark_price"]
         if mark <= 0:
             return False, "no mark price available", None
@@ -344,21 +365,23 @@ class PositionManager:
         legacy = float(self.memory.get_setting("trailing_stop_pct", 2.0))
         trigger_roi = float(self.memory.get_setting("trailing_trigger_roi_pct", 0) or 0) or legacy
         distance_pct = float(self.memory.get_setting("trailing_distance_pct", 0) or 0) or legacy
+        profit_id = self._get_profit_id(symbol, position_side, pos)
         lines = [
             f"{symbol} {position_side}",
             f"  entry={pos['entry_price']} mark={pos['mark_price']} "
             f"lev={pos['leverage']}x size={int(pos['position_size'])}c",
             f"  ROI on margin = {pos['roi']:.2f}%",
             f"  exchange SL={pos['trigger_stop_price']} TP={pos['trigger_profit_price']} "
-            f"profitId={pos['profit_id']}",
+            f"profitId={profit_id}",
             f"  breakeven fires at ROI >= {be_threshold}% -> "
             f"{'READY' if pos['roi'] >= be_threshold else 'not yet'}",
             f"  trailing fires at ROI >= {trigger_roi}% (distance {distance_pct}% of price) -> "
             f"{'READY' if pos['roi'] >= trigger_roi else 'not yet'}",
         ]
-        if not pos["profit_id"]:
-            lines.append("  BLOCKED: no profitId, so no stop can be moved. The TP/SL "
-                         "order was never accepted for this position.")
+        if not profit_id:
+            lines.append("  BLOCKED: no active TP/SL entrust found, so no stop can "
+                         "be moved. The TP/SL order was never accepted for this "
+                         "position.")
         if pos["mark_price"] <= 0:
             lines.append("  BLOCKED: exchange returned no mark price, so ROI reads 0.")
         return "\n".join(lines)
